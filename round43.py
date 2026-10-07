@@ -194,7 +194,77 @@ class Particle(pg.sprite.Sprite):
         if self.lifetime <= 0:
             self.kill()
 
+
+class RainbowBeamParticle(pg.sprite.Sprite):
+    def __init__(self, x, y, angle, font, *groups):
+        super().__init__(*groups)
+        self.font = font
+        self.pos_x = float(x)
+        self.pos_y = float(y)
+
+        # Suuri alkunopeus, jotta säde syöksyy nopeasti eteenpäin
+        self.speed = 22.0
+        self.vel_x = math.cos(angle) * self.speed
+        self.vel_y = math.sin(angle) * self.speed
+
+        # Pyörimisnopeus (Sincos-tyylinen)
+        self.spin_speed = 180
+        self.current_angle = random.randint(0, 360)
+
+        # Luodaan tyhjä pinta
+        self.image = pg.Surface((1, 1), pg.SRCALPHA)
+        self.rect = self.image.get_rect(center=(int(self.pos_x), int(self.pos_y)))
+
+    def update(self):
+        # Liikutetaan hiukkasta eteenpäin
+        self.pos_x += self.vel_x
+        self.pos_y += self.vel_y
+
+        elapsed = pg.time.get_ticks() / 1000.0
+
+        # 1. PYÖRITYS AKSALIN YMPÄRI
+        self.current_angle = (self.current_angle + self.spin_speed * (1 / 156)) % 360
+
+        # 2. TIH_EÄ GRADIENTTI (Liikkuu vasemmalta ylhäältä oikealle alas)
+        rainbow_speed = 120
+        # Muutettu kerrointa (0.5), jotta värien vaihtuvuus on entistä tiheämpää ja tarkempaa
+        spatial_factor = (self.pos_x + self.pos_y) * 0.5
+        hue = (spatial_factor + elapsed * rainbow_speed) % 360
+
+        color = pg.Color(0, 0, 0)
+        color.hsva = (hue, 100, 100, 100)
+
+        # 3. TIHEÄ RENDERÖINTI
+        # Käytetään rotozoomia luomaan pyörivä kirjain
+        letter_surf = self.font.render("S", True, color)
+        self.image = pg.transform.rotozoom(letter_surf, self.current_angle, 1.0)
+
+        self.rect = self.image.get_rect(center=(int(self.pos_x), int(self.pos_y)))
+
+        # Tuhotaan hiukkanen heti, jos se poistuu pelialueelta
+        if self.pos_x < -50 or self.pos_x > 1330 or self.pos_y < -50 or self.pos_y > 770:
+            self.kill()
+
+
+class RainbowBeam:
+    """Luokka, joka synnyttää hiukkasia tiheäksi jonoksi tulituksen aikana."""
+
+    @staticmethod
+    def fire(start_x, start_y, target_pos, font, bullet_group):
+        dx = target_pos[0] - start_x
+        dy = target_pos[1] - start_y
+        angle = math.atan2(dy, dx)
+
+        # Luodaan yhdellä framella 6 hiukkasta peräkkäin hyvin pienellä välillä (4 pikseliä),
+        # jolloin ne limittyvät täysin päällekkäin ja muodostavat kiinteän nestemäisen pötkön.
+        for i in range(6):
+            spawn_x = start_x + math.cos(angle) * (i * 4)
+            spawn_y = start_y + math.sin(angle) * (i * 4)
+            RainbowBeamParticle(spawn_x, spawn_y, angle, font, bullet_group)
+
+
 def main() -> int:
+    beam_font = pg.font.SysFont("Arial", 48, bold=True)
     bullet_group = pg.sprite.Group()
     all_sprites = pg.sprite.Group()
     enemy_group = pg.sprite.Group()
@@ -222,11 +292,22 @@ def main() -> int:
             elif e.type == pg.MOUSEBUTTONDOWN:
                 if e.button == 1:  # Vasen klikkaus
                     player.shoot(bullet_group)
+
         keys = pg.key.get_pressed()
         if keys[pg.K_LEFT] or keys[pg.K_a]:
             player.rect.x += -1
         if keys[pg.K_RIGHT] or keys[pg.K_d]:
             player.rect.x += 1
+        mouse_buttons = pg.mouse.get_pressed()
+
+        if mouse_buttons[2]:  # 2 tarkoittaa oikeaa hiiren painiketta (pohjassa pito)
+            mouse_pos = pg.mouse.get_pos()
+            start_x = player.rect.centerx
+            start_y = player.rect.centery - (player.radius // 2)
+
+            # Kutsutaan asetta joka framella, jolloin säde alkaa muodostua pelaajasta
+            # ja pitkittyy sitä mukaa kun hiukkaset syöksyvät eteenpäin
+            RainbowBeam.fire(start_x, start_y, mouse_pos, beam_font, bullet_group)
         screen.fill((0, 0, 0))
         all_sprites.update()
         bullet_group.update()
