@@ -88,7 +88,7 @@ class Enemy(pg.sprite.Sprite):
             self.jump_start_time = current_time
 
             if self.is_dropping:
-                self.base_y += self.height
+                self.base_y += self.height + 5
                 self.direction *= -1
                 self.is_dropping = False
             else:
@@ -208,7 +208,7 @@ class RainbowBeamParticle(pg.sprite.Sprite):
         self.vel_y = math.sin(angle) * self.speed
 
         # Pyörimisnopeus (Sincos-tyylinen)
-        self.spin_speed = 180
+        self.spin_speed = 80
         self.current_angle = random.randint(0, 360)
 
         # Luodaan tyhjä pinta
@@ -222,11 +222,11 @@ class RainbowBeamParticle(pg.sprite.Sprite):
 
         elapsed = pg.time.get_ticks() / 1000.0
 
-        # 1. PYÖRITYS AKSALIN YMPÄRI
+        # 1. PYÖRITYS AKSELIN YMPÄRI
         self.current_angle = (self.current_angle + self.spin_speed * (1 / 156)) % 360
 
-        # 2. TIH_EÄ GRADIENTTI (Liikkuu vasemmalta ylhäältä oikealle alas)
-        rainbow_speed = 120
+        # 2. TIHEÄ GRADIENTTI (Liikkuu vasemmalta ylhäältä oikealle alas)
+        rainbow_speed = 160
         # Muutettu kerrointa (0.5), jotta värien vaihtuvuus on entistä tiheämpää ja tarkempaa
         spatial_factor = (self.pos_x + self.pos_y) * 0.5
         hue = (spatial_factor + elapsed * rainbow_speed) % 360
@@ -236,7 +236,7 @@ class RainbowBeamParticle(pg.sprite.Sprite):
 
         # 3. TIHEÄ RENDERÖINTI
         # Käytetään rotozoomia luomaan pyörivä kirjain
-        letter_surf = self.font.render("S", True, color)
+        letter_surf = self.font.render("B", True, color)
         self.image = pg.transform.rotozoom(letter_surf, self.current_angle, 1.0)
 
         self.rect = self.image.get_rect(center=(int(self.pos_x), int(self.pos_y)))
@@ -264,7 +264,7 @@ class RainbowBeam:
 
 
 def main() -> int:
-    beam_font = pg.font.SysFont("Arial", 48, bold=True)
+    beam_font = pg.font.SysFont("Arial", 32, bold=True)
     bullet_group = pg.sprite.Group()
     all_sprites = pg.sprite.Group()
     enemy_group = pg.sprite.Group()
@@ -281,7 +281,7 @@ def main() -> int:
 
     player = Player(all_sprites)
     running = True
-    particles = 1000
+    particles = 300
     while running:
         for e in pg.event.get():
             if e.type == pg.QUIT:
