@@ -1008,39 +1008,73 @@ def dissolving_title(level, frame):
     return result
 
 
+@lru_cache(maxsize=1)
+def plasma_fields():
+    """Pienet palettikuvat: kahdeksan sekunnin saumaton aaltoanimaatio."""
+    frames = []
+    for frame in range(96):
+        phase = math.tau * frame / 96
+        field = pg.Surface((120, 68), depth=8)
+        pixels = pg.PixelArray(field)
+        cx, cy = 60 + 18 * math.sin(phase), 34 + 12 * math.cos(phase)
+        for y in range(68):
+            for x in range(120):
+                wave = (math.sin(x * 0.24 + 2 * math.sin(y * 0.18 + phase))
+                        + math.sin(y * 0.32 - x * 0.08 - phase)
+                        + math.sin(math.hypot(x - cx, y - cy) * 0.32 + phase))
+                pixels[x, y] = round(wave * 45 + x * 2 + y * 3) % 256
+        del pixels
+        frames.append(field)
+    return tuple(frames)
+
+
 class Tunnel:
     """Satunnainen, koko ruudulla näkyvä tunneli joka kolmannelle tasolle."""
     def __init__(self, level, rng=None):
         rng = rng or random
         difficulty = max(0, level // 3 - 1)
-        self.speed = min(80, 65 + difficulty * 3)
-        self.width = max(200, 300 - difficulty * 35)
-        self.top, self.bottom = 72, HEIGHT - 220
-        segments = min(6, 3 + difficulty)
-        step = (self.bottom - self.top) / segments
-        # Pakollinen sivuttaisväistö, mutta aluksen koko ja sivuttaisnopeus
-        # rajoittavat mutkien jyrkkyyttä. Vastakkaiset mutkat eivät jaa suoraa linjaa.
-        swing = min(340 + difficulty * 55,
-                    step * PLAYER_SPEED / self.speed * 0.75,
-                    step * (self.width - ENEMY_SIZE[0] - 24) / ENEMY_SIZE[1])
-        anchor = WIDTH / 2 + rng.uniform(-WIDTH * 0.12, WIDTH * 0.12)
-        self.nodes = [(self.bottom, anchor)]
-        turn = rng.choice((-1, 1))
-        for index in range(1, segments + 1):
-            center = anchor + turn * swing / 2 * rng.uniform(0.96, 1.0)
-            self.nodes.append((self.bottom - index * step, center))
-            turn *= -1
+        scale = min(WIDTH / 1920, HEIGHT / 1080)
+        self.speed = min(74, 65 + difficulty * 3) * scale
+        self.width = round(max(260, 340 - difficulty * 25) * scale)
+        self.top, self.bottom = round(72 * scale), HEIGHT - round(220 * scale)
+        sweeps = min(3, 1 + difficulty)
+        steps = 6 + min(difficulty, 3)
+        span = self.width + (100 + min(difficulty, 3) * 20) * scale
+        anchor = WIDTH / 2 + rng.uniform(-WIDTH * 0.10, WIDTH * 0.10)
+        direction = rng.choice((-1, 1))
+        self.bands = []
+        # Käytävä koostuu erikorkuisista suorakulmioista. Kunkin portaan
+        # sivusiirtymä on pieni suhteessa käytävän leveyteen, myös mutkissa.
+        lower = self.bottom
+        for sweep in range(sweeps):
+            upper = round(self.bottom - (sweep + 1) * (self.bottom - self.top) / sweeps)
+            weights = [rng.uniform(0.8, 1.2) for _ in range(steps)]
+            total = sum(weights)
+            used = 0.0
+            sweep_bottom = lower
+            for weight in weights:
+                midpoint = (used + weight / 2) / total
+                center = anchor + direction * span * (midpoint - 0.5)
+                used += weight
+                band_top = round(sweep_bottom - (sweep_bottom - upper) * used / total)
+                self.bands.append(pg.Rect(round(center - self.width / 2), band_top,
+                                          self.width, lower - band_top))
+                lower = band_top
+            direction *= -1
+        self.nodes = [(band.bottom, band.centerx) for band in self.bands]
+        self.nodes.append((self.top, self.bands[-1].centerx))
         self.player_y = float(HEIGHT - 20 - ENEMY_SIZE[1])
         self.restarting = False
         self.complete = False
+        self.visual_age = 0.0
+        self.visual_frame = 0
         self.image = self.render()
 
     def center_at(self, y):
-        for (lower_y, lower_x), (upper_y, upper_x) in zip(self.nodes, self.nodes[1:]):
-            if y >= upper_y:
-                t = max(0.0, min(1.0, (lower_y - y) / (lower_y - upper_y)))
-                return lower_x + (upper_x - lower_x) * t
-        return self.nodes[-1][1]
+        for band in self.bands:
+            if y >= band.top:
+                return band.centerx
+        return self.bands[-1].centerx
 
     def reset_player(self, player):
         player.rect.midbottom = (round(self.nodes[0][1]), HEIGHT - 20)
@@ -1050,10 +1084,9 @@ class Tunnel:
     def hits_wall(self, rect):
         if rect.bottom <= self.top or rect.top >= self.bottom:
             return False
-        low, high = max(rect.top, self.top), min(rect.bottom, self.bottom)
-        samples = [low, high] + [y for y, _ in self.nodes if low < y < high]
-        return any(rect.left < self.center_at(y) - self.width / 2
-                   or rect.right > self.center_at(y) + self.width / 2 for y in samples)
+        return any(rect.top < band.bottom and rect.bottom > band.top
+                   and (rect.left < band.left or rect.right > band.right)
+                   for band in self.bands)
 
     def update(self, dt, player, vertical=0):
         if self.complete or not player.active:
@@ -1073,27 +1106,30 @@ class Tunnel:
         if player.rect.bottom <= self.top:
             self.complete = True
 
-    def render(self):
-        image = pg.Surface((WIDTH, HEIGHT))
-        image.fill((0, 0, 0))
-        # Staattinen psykedeelinen plasma: sateenkaaria, renkaita ja aaltoja.
-        # Piirretään kerran pienelle pinnalle; ruutukohtainen työ on yksi blit.
-        plasma = pg.Surface((240, 120))
-        for py in range(plasma.get_height()):
-            for px in range(plasma.get_width()):
-                wave = (math.sin(px * 0.12 + 2 * math.sin(py * 0.09))
-                        + math.sin(py * 0.16 - px * 0.04)
-                        + math.sin(math.hypot(px - 120, py - 60) * 0.16))
-                color = pg.Color(0)
-                color.hsva = ((wave * 100 + px * 2 + py * 3) % 360, 90, 90, 100)
-                plasma.set_at((px, py), color)
-        image.blit(pg.transform.smoothscale(plasma, (WIDTH - 16, self.bottom - self.top)),
-                   (8, self.top))
-        left = [(round(center - self.width / 2), round(y)) for y, center in self.nodes]
-        right = [(round(center + self.width / 2), round(y)) for y, center in reversed(self.nodes)]
-        pg.draw.polygon(image, (0, 0, 0), left + right)
-        pg.draw.lines(image, (241, 176, 255), False, left, 2)
-        pg.draw.lines(image, (241, 176, 255), False, right, 2)
+    def draw(self, screen, dt):
+        self.visual_age += dt
+        frame = int(self.visual_age * 30)
+        if frame != self.visual_frame:
+            self.image = self.render(self.visual_age)
+            self.visual_frame = frame
+        screen.blit(self.image, (0, 0))
+
+    def render(self, age=0.0):
+        image = getattr(self, "image", None)
+        if image is None:
+            image = pg.Surface((WIDTH, HEIGHT))
+            image.fill((0, 0, 0))
+        plasma = plasma_fields()[int(age * 12) % 96].copy()
+        palette = []
+        for index in range(256):
+            color = pg.Color(0)
+            color.hsva = ((index * 360 / 256 + age * 36) % 360, 90, 90, 100)
+            palette.append(color)
+        plasma.set_palette(palette)
+        wall = image.subsurface((8, self.top, WIDTH - 16, self.bottom - self.top))
+        pg.transform.smoothscale(plasma.convert(), wall.get_size(), wall)
+        for band in self.bands:
+            image.fill((0, 0, 0), band)
         pg.draw.rect(image, (41, 39, 146), (4, self.top - 4, WIDTH - 8, HEIGHT - self.top), 4)
         return image
 
@@ -1346,7 +1382,7 @@ def main() -> int:
     screen = pg.display.set_mode((WIDTH, HEIGHT), pg.FULLSCREEN)
     WIDTH, HEIGHT = screen.get_size()
     clock = pg.time.Clock()
-    background = pg.image.load(ASSETS / "space_background.jpg").convert()
+    background = pg.image.load(ASSETS / "space_background5.jpg").convert()
     background = pg.transform.smoothscale(background, (WIDTH, HEIGHT))
     beam_font = pg.font.SysFont("Arial", 32, bold=True)
     hud_font = pg.font.SysFont("Arial", 24, bold=True)
@@ -1463,7 +1499,7 @@ def main() -> int:
                 break
         screen.blit(background, (0, 0))
         if session.progress.tunnel is not None:
-            screen.blit(session.progress.tunnel.image, (0, 0))
+            session.progress.tunnel.draw(screen, elapsed if not session.game_over else 0)
         session.player.draw_shield(screen)
         session.all_sprites.draw(screen)
         session.player.draw_fragments(screen)

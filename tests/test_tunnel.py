@@ -72,6 +72,18 @@ class TunnelTests(unittest.TestCase):
             self.assertEqual(enemy.enemy_type, enemy_type)
             self.assertEqual(enemy.hitpoints, level)
 
+    def test_plasma_moves_without_changing_tunnel_geometry(self):
+        tunnel = game.Tunnel(6, random.Random(43))
+        nodes = list(tunnel.nodes)
+        first = pg.image.tobytes(tunnel.image, 'RGB')
+        screen = pg.Surface((game.WIDTH, game.HEIGHT))
+        tunnel.draw(screen, 0.5)
+        self.assertNotEqual(first, pg.image.tobytes(tunnel.image, 'RGB'))
+        self.assertEqual(tunnel.nodes, nodes)
+        y = (tunnel.top + tunnel.bottom) // 2
+        self.assertEqual(tunnel.image.get_at((round(tunnel.center_at(y)), y))[:3], (0, 0, 0))
+        self.assertFalse(tunnel.hits_wall(pg.Rect(round(tunnel.center_at(y)), y, 1, 1)))
+
     def test_no_straight_vertical_route_remains_in_generated_tunnels(self):
         for level in (3, 6, 9, 12, 30, 84):
             for seed in range(12):
@@ -134,7 +146,8 @@ class TunnelTests(unittest.TestCase):
     def test_collision_checks_bends_inside_ship_height(self):
         tunnel = game.Tunnel(3)
         tunnel.width = 100
-        tunnel.nodes = [(tunnel.bottom, 500), (400, 500), (380, 560), (360, 500), (72, 500)]
+        tunnel.bands = [pg.Rect(450, 400, 100, tunnel.bottom - 400),
+                        pg.Rect(510, 380, 100, 20), pg.Rect(450, 72, 100, 308)]
         self.assertTrue(tunnel.hits_wall(pg.Rect(485, 358, 30, 44)))
         self.assertFalse(tunnel.hits_wall(pg.Rect(0, tunnel.bottom + 1, 30, 44)))
 
