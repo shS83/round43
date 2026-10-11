@@ -38,6 +38,7 @@ RAINBOW_PARTICLE_HUE_SPEED = 1080
 STARTING_LIVES = 3
 EXTRA_LIFE_DROP_CHANCE = 0.025
 RESPAWN_PROTECTION = 2.0
+SHIELD_PULSE_HZ = 2.0
 EXPLOSION_HOLD = 0.5
 ENEMY_SIZE = (36, 48)
 ENEMY_GAP = 48
@@ -47,6 +48,36 @@ LEVEL_TRANSITION_DURATION = 2.4
 ENEMY_SCORE = 100
 MAX_PLAYER_NAME = 24
 HIGHSCORE_PATH = Path(__file__).resolve().parent / "highscores.json"
+
+
+class SoundEffects:
+    FILES = {"cannon": "laser2.ogg", "rainbow": "laser3.ogg",
+             "lightning": "lightning1.ogg", "explosion": "explosion1.ogg"}
+
+    def __init__(self):
+        self.sounds = {}
+
+    def load(self):
+        self.sounds.clear()
+        try:
+            if not pg.mixer.get_init():
+                pg.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            pg.mixer.set_num_channels(32)
+        except pg.error:
+            return  # Peli toimii myös ilman käytettävissä olevaa äänilaitetta.
+        for name, filename in self.FILES.items():
+            try:
+                self.sounds[name] = pg.mixer.Sound(str(ASSETS / filename))
+            except (pg.error, OSError):
+                continue  # Puuttuva tai viallinen ääni ei estä muita ääniä.
+
+    def play(self, name):
+        sound = self.sounds.get(name)
+        if sound is not None and pg.mixer.get_init():
+            sound.play()
+
+
+sound_effects = SoundEffects()
 
 
 @lru_cache(maxsize=None)
@@ -160,38 +191,54 @@ class Bullet(pg.sprite.Sprite):
         surface.blit(self.image, (round(self.pos.x) - 32, round(self.pos.y) - 28))
 
 
-@lru_cache(maxsize=1)
 def purple_fire_frames():
+    return enemy_fire_frames("purple")
+
+
+@lru_cache(maxsize=4)
+def enemy_fire_frames(palette):
     frames = []
     for source in fire_frames():
         image = source.copy()
-        # Oranssin lämpöpaletin punainen/keltaisuus muutetaan purppuraksi.
-        # Alpha ja lämpökentän animaatio säilyvät samoina.
+        # Säilytä lämpökentän kirkkausvaihtelu ja läpinäkyvyys.
         pixels = pg.PixelArray(image)
         for x in range(image.get_width()):
             for y in range(image.get_height()):
                 color = source.get_at((x, y))
-                pixels[x, y] = (max(color.g, int(color.r * 0.8)), color.b,
-                                color.r, color.a)
+                if palette == "purple":
+                    tint = (max(color.g, int(color.r * 0.8)), color.b, color.r)
+                elif palette == "green":
+                    tint = (color.b, color.r, color.b)
+                elif palette == "yellow":
+                    tint = (color.r, color.r, color.b)
+                else:
+                    brightness = max(color.r, color.g, color.b)
+                    tint = (brightness,) * 3
+                pixels[x, y] = (*tint, color.a)
         del pixels
         frames.append(pg.transform.scale(pg.transform.flip(image, False, True), ENEMY_BULLET_SIZE))
     return tuple(frames)
 
 
 class EnemyBullet(Bullet):
-    def __init__(self, start_x, start_y, *groups):
+    def __init__(self, start_x, start_y, *groups, angle=0, palette="purple"):
         super().__init__(start_x, start_y, *groups)
-        self.frames = purple_fire_frames()
+        self.palette = palette
+        self.frames = enemy_fire_frames(palette)
         self.image = self.frames[0]
         self.rect.size = ENEMY_BULLET_HITBOX
         self.rect.center = self.pos
+        radians = math.radians(angle)
+        self.velocity = pg.Vector2(math.sin(radians), math.cos(radians)) * ENEMY_BULLET_SPEED
 
     def update(self, dt):
         self.age += dt
-        self.pos.y += ENEMY_BULLET_SPEED * dt
+        self.pos += self.velocity * dt
         self.rect.center = self.pos
         self.image = self.frames[int(self.age * 30) % len(self.frames)]
-        if self.pos.y - ENEMY_BULLET_ANCHOR[1] > HEIGHT:
+        if (self.pos.y - ENEMY_BULLET_ANCHOR[1] > HEIGHT
+                or self.pos.x + self.image.get_width() - ENEMY_BULLET_ANCHOR[0] < 0
+                or self.pos.x - ENEMY_BULLET_ANCHOR[0] > WIDTH):
             self.kill()
 
     def draw(self, surface):
@@ -301,6 +348,7 @@ class Player(pg.sprite.Sprite):
         self.image = ship_image(random.choice(tuple(f"pelaaja{i}.png" for i in range(1, 5))), ENEMY_SIZE)
         self.rect = self.image.get_rect(midbottom=(WIDTH // 2, HEIGHT - 20))
         self.pos_x = float(self.rect.x)
+        self.pos_y = float(self.rect.y)
         self.lives = STARTING_LIVES
         self.fragments = []
         self.invulnerable_remaining = 0.0
@@ -324,6 +372,7 @@ class Player(pg.sprite.Sprite):
     def hit(self):
         if not self.active or self.invulnerable_remaining > 0:
             return False
+        sound_effects.play("explosion")
         self.lives -= 1
         self.explosion_age = 0.0
         self.rainbow_remaining = 0.0
@@ -370,8 +419,12 @@ class Player(pg.sprite.Sprite):
 
     def draw_shield(self, surface):
         if self.active and self.invulnerable_remaining > 0:
-            surface.blit(self.shield_glow,
-                         self.shield_glow.get_rect(center=self.rect.center),
+            age = RESPAWN_PROTECTION - self.invulnerable_remaining
+            strength = 0.625 + 0.375 * math.cos(math.tau * SHIELD_PULSE_HZ * age)
+            # Additiivinen piirto tarvitsee RGB-kirkkauden, ei pinnan alphaa.
+            glow = self.shield_glow.copy()
+            glow.fill((round(255 * strength),) * 3, special_flags=pg.BLEND_RGB_MULT)
+            surface.blit(glow, glow.get_rect(center=self.rect.center),
                          special_flags=pg.BLEND_RGB_ADD)
 
     def collect(self, powerup):
@@ -384,14 +437,16 @@ class Player(pg.sprite.Sprite):
         else:
             self.rainbow_charges += RAINBOW_CHARGES
 
-    def move(self, direction, dt):
+    def move(self, direction, dt, vertical=0):
         if not self.active:
             return
         self.pos_x = max(0, min(WIDTH - self.rect.width, self.pos_x + direction * PLAYER_SPEED * dt))
-        self.rect.x = round(self.pos_x)
+        self.pos_y = max(0, min(HEIGHT - self.rect.height, self.pos_y + vertical * PLAYER_SPEED * dt))
+        self.rect.topleft = (round(self.pos_x), round(self.pos_y))
 
     def shoot(self, bullet_group):
         if self.active:
+            sound_effects.play("cannon")
             Bullet(self.rect.centerx, self.rect.top, bullet_group, damage=self.cannon_power)
             MuzzleFlash(*self.rect.midtop, self.effects)
 
@@ -409,6 +464,7 @@ class Player(pg.sprite.Sprite):
             return False
         enemy = random.choice(enemies.sprites())
         self.lightning_charges -= 1
+        sound_effects.play("lightning")
         Lightning(self.rect.midtop, enemy.rect.center, all_sprites)
         MuzzleFlash(*self.rect.midtop, self.effects)
         damage_enemy(enemy, all_sprites, powerups, drops, progress, lethal=True)
@@ -418,6 +474,7 @@ class Player(pg.sprite.Sprite):
         if not self.active or self.rainbow_charges <= 0 or self.rainbow_remaining > 0:
             return False
         self.rainbow_charges -= 1
+        sound_effects.play("rainbow")
         MuzzleFlash(*self.rect.midtop, self.effects)
         self.rainbow_remaining = RAINBOW_DURATION
         self.rainbow_emission = 0.0
@@ -440,18 +497,28 @@ class Player(pg.sprite.Sprite):
 
 BIRD_FIRST_LEVEL = 5
 RECT_ENEMY_FIRST_LEVEL = 6
-ENEMY_CYCLE_LENGTH = 6
+RAINBOW_BAR_ENEMY_TYPE = 7
+ENEMY_CYCLE_LENGTH = 7
+ENEMY_PROJECTILE_COLORS = ("purple", "green", "yellow", "white")
+# Arvotaan kerran prosessin käynnistyessä, ei tasojen tai uusien pelien välillä.
+ENEMY_PROJECTILE_PALETTES = {kind: random.choice(ENEMY_PROJECTILE_COLORS)
+                             for kind in range(1, ENEMY_CYCLE_LENGTH + 1)}
+RAINBOW_BAR_FPS = 30
 BIRD_COLORS = ((255, 65, 75), (65, 245, 245), (255, 80, 245), (250, 250, 75))
 BIRD_ANIMATION_FPS = 6
 BIRD_FLIGHT_SPEED = 20
 BIRD_FLIGHT_AXIS = "x"
 
 
-@lru_cache(maxsize=1)
-def rect_enemy_image():
+RECT_ROW_COLORS = ((200, 255, 200), (255, 170, 220), (160, 210, 255),
+                   (255, 225, 120), (200, 170, 255), (120, 255, 230))
+
+
+@lru_cache(maxsize=6)
+def rect_enemy_image(color=RECT_ROW_COLORS[0]):
     """Palautettu commitista 3e8021c: alkuperäiset kuusi pg.draw.rect-komentoa."""
     image = pg.Surface((24, 32), pg.SRCALPHA)
-    pg.draw.rect(image, (200, 255, 200), (0, 0, 24, 32))
+    pg.draw.rect(image, color, (0, 0, 24, 32))
     pg.draw.rect(image, (0, 0, 0, 0), (5, 5, 6, 6))
     pg.draw.rect(image, (0, 0, 0, 0), (14, 5, 6, 6))
     pg.draw.rect(image, (0, 0, 0, 0), (0, 22, 6, 8))
@@ -477,18 +544,43 @@ def bird_frames(color=BIRD_COLORS[1]):
     return tuple(frames)
 
 
+@lru_cache(maxsize=1)
+def rainbow_bar_frames():
+    """Sateenkaariviiva ja pehmeä hohto, yksi kierros myötäpäivään / 2 s."""
+    frames = []
+    scale = 3
+    center = pg.Vector2(ENEMY_SIZE) * scale / 2
+    for frame in range(60):
+        image = pg.Surface((ENEMY_SIZE[0] * scale, ENEMY_SIZE[1] * scale), pg.SRCALPHA)
+        angle = math.tau * frame / 60
+        axis = pg.Vector2(math.sin(angle), -math.cos(angle))
+        for width, alpha in ((12, 18), (8, 45), (5, 100), (3, 255)):
+            for segment in range(12):
+                color = pg.Color(0)
+                color.hsva = ((segment * 30 + frame * 6) % 360, 85, 100, 100)
+                start = center + axis * ((segment * 2 - 12) * scale)
+                end = center + axis * (((segment + 1) * 2 - 12) * scale)
+                pg.draw.line(image, (*color[:3], alpha), start, end, width * scale)
+        frames.append(pg.transform.smoothscale(image, ENEMY_SIZE))
+    return tuple(frames)
+
+
 class Enemy(pg.sprite.Sprite):
-    def __init__(self, start_x, start_y, *groups, enemy_group=None, level=1, effects=None):
+    def __init__(self, start_x, start_y, *groups, enemy_group=None, level=1, effects=None, enemy_type=None):
         super().__init__(*groups)
         self.width, self.height = ENEMY_SIZE
         self.level = level
-        self.enemy_type = (level - 1) % ENEMY_CYCLE_LENGTH + 1
+        self.enemy_type = (level - 1) % ENEMY_CYCLE_LENGTH + 1 if enemy_type is None else enemy_type
         self.is_bird = self.enemy_type == BIRD_FIRST_LEVEL
         if self.is_bird:
             self.bird_color = random.choice(BIRD_COLORS)
             self.frames = bird_frames(self.bird_color)
         elif self.enemy_type == RECT_ENEMY_FIRST_LEVEL:
-            self.frames = (rect_enemy_image(),)
+            row = max(0, round((start_y - 64) / (ENEMY_SIZE[1] + ENEMY_GAP)))
+            self.row_color = RECT_ROW_COLORS[row % len(RECT_ROW_COLORS)]
+            self.frames = (rect_enemy_image(self.row_color),)
+        elif self.enemy_type == RAINBOW_BAR_ENEMY_TYPE:
+            self.frames = rainbow_bar_frames()
         else:
             self.frames = (ship_image(f"vihu{self.enemy_type}.png", ENEMY_SIZE),)
         self.image = self.frames[0]
@@ -502,6 +594,7 @@ class Enemy(pg.sprite.Sprite):
         self.animation_age = random.uniform(0, 4 / BIRD_ANIMATION_FPS) if self.is_bird else 0.0
         self.hitpoints = level
         self.speed_multiplier = 1.1 ** (level - 1)
+        self.initial_wave_size = 1
         self.flash_remaining = 0.0
         self.rect = self.image.get_rect(topleft=(start_x, start_y))
         self.base_x, self.base_y = float(start_x), float(start_y)
@@ -517,6 +610,14 @@ class Enemy(pg.sprite.Sprite):
         self.drop_y = None
         self.shot_remaining = random.uniform(*ENEMY_SHOT_INTERVAL)
 
+    @property
+    def depletion_multiplier(self):
+        if self.enemy_group is None or self.initial_wave_size <= 1:
+            return 1.0
+        remaining = max(1, len(self.enemy_group))
+        cleared = max(0, self.initial_wave_size - remaining)
+        return 1.0 + cleared / (self.initial_wave_size - 1)
+
     def take_hit(self, damage=1):
         if self.hitpoints <= 0:
             return False
@@ -528,136 +629,102 @@ class Enemy(pg.sprite.Sprite):
         self.image = self.flash_image
         return False
 
-    def next_drop_y(self):
-        """Ohita vastakkaiseen suuntaan kulkevat ja varatut laskeutumisrivit."""
-        spacing = self.height + ENEMY_GAP
-        target_y = self.base_y + spacing
-        landing_direction = -self.direction
+    def movement_clear(self, candidate, wrapped=False):
+        if wrapped:
+            # Reunanylitys ei kulje ruudun keskellä olevien alusten läpi.
+            exit_path = self.rect.union(pg.Rect(WIDTH, self.rect.y, self.width, self.height))
+            entry_path = candidate.union(pg.Rect(-self.width, round(self.base_y),
+                                                  2 * self.width, self.height))
+            paths = (exit_path, entry_path)
+        else:
+            paths = (self.rect.union(candidate),)
         enemies = self.enemy_group if self.enemy_group is not None else ()
-        occupied = []
         for enemy in enemies:
             if enemy is self:
                 continue
-            if enemy.direction != landing_direction:
-                occupied.append(enemy.base_y)
-            if enemy.is_dropping and -enemy.direction != landing_direction:
-                occupied.append(enemy.drop_y)
-        while any(row is not None and abs(row - target_y) < 1 for row in occupied):
-            target_y += spacing
-        return target_y
+            occupied = enemy.rect.union(pg.Rect(round(enemy.base_x), round(enemy.base_y),
+                                                enemy.width, enemy.height))
+            if any(path.colliderect(occupied) for path in paths):
+                return False
+        return True
 
     def update_weapon(self, dt, bullet_group):
         self.shot_remaining -= dt
         if self.shot_remaining <= 0:
-            EnemyBullet(self.rect.centerx, self.rect.bottom + 12, bullet_group)
+            angle = random.choice((-30, 30)) if self.level in (2, 5, 7) else 0
+            EnemyBullet(self.rect.centerx, self.rect.bottom + 12, bullet_group, angle=angle,
+                        palette=ENEMY_PROJECTILE_PALETTES[self.enemy_type])
             MuzzleFlash(*self.rect.midbottom, self.effects, enemy=True)
             self.shot_remaining += random.uniform(*ENEMY_SHOT_INTERVAL)
 
     def update_flight(self, dt):
         distance = BIRD_FLIGHT_SPEED * dt
-        previous = (self.base_x, self.base_y, self.direction, self.is_dropping, self.drop_y)
+        previous = (self.base_x, self.base_y)
         wrapped = False
         if BIRD_FLIGHT_AXIS == "y":
             self.base_y += distance
             if self.base_y > HEIGHT:
                 self.base_y = -float(self.height) + (self.base_y - HEIGHT)
                 wrapped = True
-        elif self.is_dropping:
-            self.base_y = min(self.drop_y, self.base_y + distance)
-            if self.base_y >= self.drop_y:
-                self.direction *= -1
-                self.is_dropping = False
-                self.drop_y = None
         else:
-            next_x = self.base_x + distance * self.direction
-            self.base_x = max(0.0, min(WIDTH - self.width, next_x))
-            if next_x < 0 or next_x > WIDTH - self.width:
-                self.is_dropping = True
-                self.drop_y = self.next_drop_y()
+            self.base_x += distance
+            while self.base_x >= WIDTH:
+                self.base_x -= WIDTH + self.width
+                self.base_y += self.height + ENEMY_GAP
+                if self.base_y >= HEIGHT:
+                    self.base_y = 64.0
+                wrapped = True
         candidate = self.rect.copy()
         candidate.topleft = (round(self.base_x), round(self.base_y))
-        path = candidate if wrapped else self.rect.union(candidate)
-        if self.is_dropping:
-            path = path.union(pg.Rect(round(self.base_x), round(self.drop_y), self.width, self.height))
-        if self.enemy_group is not None:
-            for enemy in self.enemy_group:
-                if enemy is self:
-                    continue
-                occupied = enemy.rect
-                if enemy.is_dropping:
-                    occupied = occupied.union(pg.Rect(round(enemy.base_x), round(enemy.drop_y),
-                                                       enemy.width, enemy.height))
-                if path.colliderect(occupied):
-                    self.base_x, self.base_y, self.direction, self.is_dropping, self.drop_y = previous
-                    return
+        if BIRD_FLIGHT_AXIS == "y" and wrapped:
+            clear = not any(candidate.colliderect(enemy.rect) for enemy in
+                            (self.enemy_group if self.enemy_group is not None else ())
+                            if enemy is not self)
+        else:
+            clear = self.movement_clear(candidate, wrapped)
+        if not clear:
+            self.base_x, self.base_y = previous
+            return
         self.rect = candidate
 
     def update(self, dt):
         self.flash_remaining = max(0.0, self.flash_remaining - dt)
         self.animation_age += dt
-        frame = int(self.animation_age * BIRD_ANIMATION_FPS) % len(self.frames)
+        animation_fps = RAINBOW_BAR_FPS if self.enemy_type == RAINBOW_BAR_ENEMY_TYPE else BIRD_ANIMATION_FPS
+        frame = int(self.animation_age * animation_fps) % len(self.frames)
         self.normal_image = self.frames[frame]
         self.flash_image = self.flash_frames[frame]
         self.image = self.flash_image if self.flash_remaining > 0 else self.normal_image
-        dt *= self.speed_multiplier
+        dt *= self.speed_multiplier * self.depletion_multiplier
         if self.is_bird:
             self.update_flight(dt)
             return
-        previous = (self.phase, self.base_x, self.base_y, self.direction,
-                    self.is_dropping, self.drop_y, self.jump_cooldown)
-        previous_rect = self.rect.copy()
+        previous = (self.phase, self.base_x, self.base_y, self.jump_cooldown)
         self.phase += dt
         cycle = self.jump_duration + self.jump_cooldown
         while self.phase >= cycle:
             self.phase -= cycle
+            self.base_x += self.jump_distance
             self.jump_cooldown = random.uniform(0.35, 1.3)
             cycle = self.jump_duration + self.jump_cooldown
-            if self.is_dropping:
-                self.base_y = self.drop_y
-                self.direction *= -1
-                self.is_dropping = False
-                self.drop_y = None
-            else:
-                self.base_x = max(0, min(WIDTH - self.width,
-                                       self.base_x + self.jump_distance * self.direction))
-                next_x = self.base_x + self.jump_distance * self.direction
-                self.is_dropping = next_x < 0 or next_x + self.width > WIDTH
-                if self.is_dropping:
-                    self.drop_y = self.next_drop_y()
         progress = max(0.0, min(1.0, self.phase / self.jump_duration))
-        if self.is_dropping:
-            x = self.base_x
-            y = self.base_y + (self.drop_y - self.base_y) * progress
-        else:
-            x = max(0, min(WIDTH - self.width,
-                           self.base_x + self.jump_distance * self.direction * progress))
-            y = self.base_y - math.sin(progress * math.pi) * self.jump_height
+        x = self.base_x + self.jump_distance * progress
+        wrapped = False
+        while x >= WIDTH:
+            x -= WIDTH + self.width
+            self.base_x -= WIDTH + self.width
+            self.base_y += self.height + ENEMY_GAP
+            if self.base_y >= HEIGHT:
+                self.base_y = 64.0
+            wrapped = True
+        y = self.base_y - math.sin(progress * math.pi) * self.jump_height
         candidate = self.rect.copy()
         candidate.topleft = (round(x), round(y))
-        if self.enemy_group is not None:
-            path = previous_rect.union(candidate)
-            if self.is_dropping:
-                path = path.union(pg.Rect(round(self.base_x), round(self.base_y),
-                                          self.width, self.height))
-                path = path.union(pg.Rect(round(self.base_x), round(self.drop_y),
-                                          self.width, self.height))
-            for enemy in self.enemy_group:
-                if enemy is self:
-                    continue
-                # Vaakasuuntainen hyppy ei saa osua odottavaan rivinvaihtajaan.
-                # Varaa myös hypyn korkeus ja koko seuraavan loikan leveys.
-                occupied = enemy.rect.union(pg.Rect(round(enemy.base_x), round(enemy.base_y),
-                                                    enemy.width, enemy.height))
-                if enemy.is_dropping:
-                    occupied = occupied.union(pg.Rect(round(enemy.base_x), round(enemy.drop_y),
-                                                       enemy.width, enemy.height))
-                if self.is_dropping and not previous[4]:
-                    occupied.inflate_ip(2 * enemy.jump_distance, 2 * (enemy.jump_height + 4))
-                if path.colliderect(occupied):
-                    (self.phase, self.base_x, self.base_y, self.direction,
-                     self.is_dropping, self.drop_y, self.jump_cooldown) = previous
-                    return  # Odota, kunnes toinen vihollinen on väistänyt liikeradalta.
+        if not self.movement_clear(candidate, wrapped):
+            self.phase, self.base_x, self.base_y, self.jump_cooldown = previous
+            return
         self.rect = candidate
+
 
 
 class Particle(pg.sprite.Sprite):
@@ -898,11 +965,15 @@ def spawn_enemies(all_sprites, enemy_group, horde=DEFAULT_HORDE_SIZE, *, level=1
     cols = min(horde, max(1, (WIDTH - ENEMY_GAP) // spacing))
     formation_width = cols * spacing - ENEMY_GAP
     left = (WIDTH - formation_width) // 2
+    # Tunnelit eivät kuluta vihollistyyppien kiertoa.
+    combat_level = level - level // 3
     for index in range(horde):
         enemy = Enemy(left + (index % cols) * spacing,
               64 + (index // cols) * (ENEMY_SIZE[1] + ENEMY_GAP), all_sprites, enemy_group,
-              enemy_group=enemy_group, level=level, effects=all_sprites)
+              enemy_group=enemy_group, level=level, effects=all_sprites,
+              enemy_type=(combat_level - 1) % ENEMY_CYCLE_LENGTH + 1)
         enemy.phase = -random.uniform(0, 1.3)
+        enemy.initial_wave_size = horde
 
 
 @lru_cache(maxsize=4)
@@ -937,11 +1008,119 @@ def dissolving_title(level, frame):
     return result
 
 
+class Tunnel:
+    """Satunnainen, koko ruudulla näkyvä tunneli joka kolmannelle tasolle."""
+    def __init__(self, level, rng=None):
+        rng = rng or random
+        difficulty = max(0, level // 3 - 1)
+        self.speed = min(80, 65 + difficulty * 3)
+        self.width = max(200, 300 - difficulty * 35)
+        self.top, self.bottom = 72, HEIGHT - 220
+        segments = min(6, 3 + difficulty)
+        step = (self.bottom - self.top) / segments
+        # Pakollinen sivuttaisväistö, mutta aluksen koko ja sivuttaisnopeus
+        # rajoittavat mutkien jyrkkyyttä. Vastakkaiset mutkat eivät jaa suoraa linjaa.
+        swing = min(340 + difficulty * 55,
+                    step * PLAYER_SPEED / self.speed * 0.75,
+                    step * (self.width - ENEMY_SIZE[0] - 24) / ENEMY_SIZE[1])
+        anchor = WIDTH / 2 + rng.uniform(-WIDTH * 0.12, WIDTH * 0.12)
+        self.nodes = [(self.bottom, anchor)]
+        turn = rng.choice((-1, 1))
+        for index in range(1, segments + 1):
+            center = anchor + turn * swing / 2 * rng.uniform(0.96, 1.0)
+            self.nodes.append((self.bottom - index * step, center))
+            turn *= -1
+        self.player_y = float(HEIGHT - 20 - ENEMY_SIZE[1])
+        self.restarting = False
+        self.complete = False
+        self.image = self.render()
+
+    def center_at(self, y):
+        for (lower_y, lower_x), (upper_y, upper_x) in zip(self.nodes, self.nodes[1:]):
+            if y >= upper_y:
+                t = max(0.0, min(1.0, (lower_y - y) / (lower_y - upper_y)))
+                return lower_x + (upper_x - lower_x) * t
+        return self.nodes[-1][1]
+
+    def reset_player(self, player):
+        player.rect.midbottom = (round(self.nodes[0][1]), HEIGHT - 20)
+        player.pos_x = float(player.rect.x)
+        self.player_y = player.pos_y = float(player.rect.y)
+
+    def hits_wall(self, rect):
+        if rect.bottom <= self.top or rect.top >= self.bottom:
+            return False
+        low, high = max(rect.top, self.top), min(rect.bottom, self.bottom)
+        samples = [low, high] + [y for y, _ in self.nodes if low < y < high]
+        return any(rect.left < self.center_at(y) - self.width / 2
+                   or rect.right > self.center_at(y) + self.width / 2 for y in samples)
+
+    def update(self, dt, player, vertical=0):
+        if self.complete or not player.active:
+            return
+        if self.restarting:
+            self.reset_player(player)
+            self.restarting = False
+        self.player_y = max(0, min(HEIGHT - player.height,
+                                   self.player_y + (vertical * PLAYER_SPEED - self.speed) * dt))
+        player.pos_y = self.player_y
+        player.rect.y = round(self.player_y)
+        if self.hits_wall(player.rect):
+            if player.hit():
+                self.restarting = True
+            return
+        # Koko aluksen on päästävä ulos tunnelista.
+        if player.rect.bottom <= self.top:
+            self.complete = True
+
+    def render(self):
+        image = pg.Surface((WIDTH, HEIGHT))
+        image.fill((0, 0, 0))
+        # Staattinen psykedeelinen plasma: sateenkaaria, renkaita ja aaltoja.
+        # Piirretään kerran pienelle pinnalle; ruutukohtainen työ on yksi blit.
+        plasma = pg.Surface((240, 120))
+        for py in range(plasma.get_height()):
+            for px in range(plasma.get_width()):
+                wave = (math.sin(px * 0.12 + 2 * math.sin(py * 0.09))
+                        + math.sin(py * 0.16 - px * 0.04)
+                        + math.sin(math.hypot(px - 120, py - 60) * 0.16))
+                color = pg.Color(0)
+                color.hsva = ((wave * 100 + px * 2 + py * 3) % 360, 90, 90, 100)
+                plasma.set_at((px, py), color)
+        image.blit(pg.transform.smoothscale(plasma, (WIDTH - 16, self.bottom - self.top)),
+                   (8, self.top))
+        left = [(round(center - self.width / 2), round(y)) for y, center in self.nodes]
+        right = [(round(center + self.width / 2), round(y)) for y, center in reversed(self.nodes)]
+        pg.draw.polygon(image, (0, 0, 0), left + right)
+        pg.draw.lines(image, (241, 176, 255), False, left, 2)
+        pg.draw.lines(image, (241, 176, 255), False, right, 2)
+        pg.draw.rect(image, (41, 39, 146), (4, self.top - 4, WIDTH - 8, HEIGHT - self.top), 4)
+        return image
+
+
 class LevelProgress:
     def __init__(self):
         self.level = 1
         self.score = 0
         self.transition_remaining = 0.0
+        self.tunnel = None
+
+    @property
+    def tunnel_level(self):
+        return self.level % 3 == 0
+
+    def start_level(self, all_sprites, enemies, player):
+        self.tunnel = None
+        player.rect.bottom = HEIGHT - 20
+        player.pos_y = float(player.rect.y)
+        if self.tunnel_level:
+            for sprite in list(all_sprites):
+                if sprite is not player:
+                    sprite.kill()
+            self.tunnel = Tunnel(self.level)
+            self.tunnel.reset_player(player)
+        else:
+            spawn_enemies(all_sprites, enemies, level=self.level)
 
     @property
     def transitioning(self):
@@ -959,9 +1138,12 @@ class LevelProgress:
         if self.transitioning:
             self.transition_remaining = max(0.0, self.transition_remaining - dt)
             if not self.transitioning:
-                spawn_enemies(all_sprites, enemies, level=self.level)
-        elif not enemies and player.lives > 0:
+                self.start_level(all_sprites, enemies, player)
+        elif (self.tunnel.complete if self.tunnel is not None else not enemies) and player.active:
             self.level += 1
+            self.tunnel = None
+            player.rect.bottom = HEIGHT - 20
+            player.pos_y = float(player.rect.y)
             self.transition_remaining = LEVEL_TRANSITION_DURATION
             bullets.empty()
             enemy_bullets.empty()
@@ -971,6 +1153,7 @@ class LevelProgress:
 def damage_enemy(enemy, all_sprites, powerups, drops, progress, *, lethal=False, damage=1):
     if not enemy.take_hit(enemy.hitpoints if lethal else damage):
         return False
+    sound_effects.play("explosion")
     progress.score += ENEMY_SCORE
     for _ in range(120):
         Particle(*enemy.rect.center, all_sprites)
@@ -1059,9 +1242,15 @@ class GameSession:
                     sprite.kill()
         self.progress.level += 1
         self.progress.transition_remaining = 0.0
+        self.progress.tunnel = None
         self.player.rainbow_remaining = 0.0
         self.player.rainbow_emission = 0.0
-        spawn_enemies(self.all_sprites, self.enemy_group, level=self.progress.level)
+        self.player.rect.bottom = HEIGHT - 20
+        self.player.pos_y = float(self.player.rect.y)
+        if self.progress.tunnel_level:
+            self.progress.transition_remaining = LEVEL_TRANSITION_DURATION
+        else:
+            self.progress.start_level(self.all_sprites, self.enemy_group, self.player)
         return True
 
     def finish_if_dead(self, highscores, space_held=False):
@@ -1151,7 +1340,9 @@ class StartScreen:
 
 def main() -> int:
     global WIDTH, HEIGHT
+    pg.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
     pg.init()
+    sound_effects.load()
     screen = pg.display.set_mode((WIDTH, HEIGHT), pg.FULLSCREEN)
     WIDTH, HEIGHT = screen.get_size()
     clock = pg.time.Clock()
@@ -1169,6 +1360,12 @@ def main() -> int:
     muzzle_frames(enemy=True)
     for angle in range(36):
         beam_letter(angle)
+    if pg.mixer.get_init():
+        try:
+            pg.mixer.music.load(str(ASSETS / "music1.ogg"))
+            pg.mixer.music.play(loops=-1)
+        except (pg.error, OSError):
+            pass  # Alkuvalikko toimii myös ilman musiikkitiedostoa.
     running = True
     accumulator = 0.0
     clock.tick()  # Kuvien latausaika ei kuulu ensimmäiseen peliaskeleeseen.
@@ -1183,6 +1380,8 @@ def main() -> int:
                 running = False
             elif session is None:
                 if event.type == pg.KEYDOWN and event.key == pg.K_SPACE and not getattr(event, "repeat", False):
+                    if pg.mixer.get_init():
+                        pg.mixer.music.stop()
                     session = GameSession()
                     accumulator = 0.0
             elif session.game_over:
@@ -1199,13 +1398,15 @@ def main() -> int:
             elif event.type == pg.KEYDOWN and event.key == pg.K_F5 and not getattr(event, "repeat", False):
                 session.skip_level()
                 accumulator = 0.0
-            elif event.type == pg.KEYDOWN and not session.progress.transitioning and not getattr(event, "repeat", False):
+            elif (event.type == pg.KEYDOWN and not session.progress.transitioning
+                  and not session.progress.tunnel_level and not getattr(event, "repeat", False)):
                 if event.key == pg.K_SPACE:
                     session.player.shoot(session.bullet_group)
                     session.player.space_fire_remaining = SPACE_FIRE_INTERVAL
                 elif event.key == pg.K_F1:
                     session.player.fire_lightning(session.enemy_group, session.all_sprites, session.powerups, session.drops, session.progress)
-            elif event.type == pg.MOUSEBUTTONDOWN and not session.progress.transitioning:
+            elif (event.type == pg.MOUSEBUTTONDOWN and not session.progress.transitioning
+                  and not session.progress.tunnel_level):
                 if event.button == 1:
                     session.player.shoot(session.bullet_group)
                 elif event.button == 3:
@@ -1220,6 +1421,7 @@ def main() -> int:
             continue
         keys = pg.key.get_pressed()
         direction = int(keys[pg.K_RIGHT] or keys[pg.K_d]) - int(keys[pg.K_LEFT] or keys[pg.K_a])
+        vertical = int(keys[pg.K_DOWN] or keys[pg.K_s]) - int(keys[pg.K_UP] or keys[pg.K_w])
         target = pg.mouse.get_pos()
         if session.game_over:
             accumulator = 0.0
@@ -1227,9 +1429,10 @@ def main() -> int:
                 session.restart_ready = True
         while not session.game_over and accumulator + 1e-9 >= STEP:
             session.drops.update(STEP)
-            session.player.move(direction, STEP)
-            session.player.update_space_fire(keys[pg.K_SPACE] and not session.progress.transitioning, STEP, session.bullet_group)
-            if not session.progress.transitioning:
+            session.player.move(direction, STEP, vertical=0 if session.progress.tunnel is not None else vertical)
+            weapons_enabled = not session.progress.transitioning and not session.progress.tunnel_level
+            session.player.update_space_fire(keys[pg.K_SPACE] and weapons_enabled, STEP, session.bullet_group)
+            if weapons_enabled:
                 session.player.update_rainbow(STEP, target, beam_font, session.bullet_group)
             session.all_sprites.update(STEP)
             session.bullet_group.update(STEP)
@@ -1247,6 +1450,8 @@ def main() -> int:
             if session.player.active and (pg.sprite.spritecollide(session.player, session.enemy_group, False)
                     or pg.sprite.spritecollide(session.player, session.enemy_bullets, True)):
                 session.player.hit()
+            if session.progress.tunnel is not None and not session.progress.transitioning:
+                session.progress.tunnel.update(STEP, session.player, vertical=vertical)
             session.progress.update(STEP, session.all_sprites, session.enemy_group, session.bullet_group, session.enemy_bullets, session.player)
             was_game_over = session.game_over
             session.finish_if_dead(highscores, keys[pg.K_SPACE])
@@ -1257,6 +1462,8 @@ def main() -> int:
             if not running:
                 break
         screen.blit(background, (0, 0))
+        if session.progress.tunnel is not None:
+            screen.blit(session.progress.tunnel.image, (0, 0))
         session.player.draw_shield(screen)
         session.all_sprites.draw(screen)
         session.player.draw_fragments(screen)
@@ -1267,7 +1474,10 @@ def main() -> int:
         active = f"  |  burst {session.player.rainbow_remaining:.1f} s" if session.player.rainbow_remaining else ""
         hud = hud_font.render(f"Score: {session.progress.score}  |  Level: {session.progress.level}  |  Lives: {session.player.lives}  |  Rainbow: {session.player.rainbow_charges} x {RAINBOW_DURATION:g} s  |  Lightning F1: {session.player.lightning_charges}{active}", True, (255, 255, 255))
         screen.blit(hud, (20, HEIGHT - 36))
-        cannon_hud = hud_font.render(f"MAIN CANNON POWER: {session.player.cannon_power}/{MAX_CANNON_POWER} HP",
+        status_text = ("TUNNEL — ARROW KEYS / WASD — reach the top"
+                       if session.progress.tunnel_level else
+                       f"MAIN CANNON POWER: {session.player.cannon_power}/{MAX_CANNON_POWER} HP")
+        cannon_hud = hud_font.render(status_text,
                                      True, (255, 255, 255))
         screen.blit(cannon_hud, (20, 20))
         if session.progress.transitioning and not session.game_over:

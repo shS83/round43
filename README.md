@@ -5,7 +5,7 @@ Remix of the old Round42 game.
 ## Pelaaminen
 
 - Käynnistys: `uv run round43.py`. Aloitusruutu näyttää `assets/round43-logo.png`-kuvan ja sisään/ulos feidautuvan tekstin “Press space bar to start the game”. Välilyönti aloittaa pelin.
-- Liikkuminen: A/D tai nuolinäppäimet.
+- Liikkuminen: WASD tai nuolinäppäimet kaikkiin neljään suuntaan. Alus pysyy ruudun sisällä, myös alareunassa.
 - Vasen hiirinappi tai välilyönti: oranssi tulipallo suoraan ylöspäin. Välilyönti pohjassa ampuu jatkuvasti 0,15 sekunnin välein.
 - Kerää vihollisesta putoava sateenkaaren värinen R-powerup aluksella: saat 3 rainbow-pursketta. Pudotustodennäköisyys on 2,5 %, ja pudotusten välillä on vähintään 12 sekuntia.
 - Oikean hiirinapin painallus: yksi 0,5 sekunnin mittainen rainbow-purske hiiren osoittimen suuntaan. Seuraava purske vaatii uuden painalluksen. Ruudun alareuna näyttää jäljellä olevat lataukset.
@@ -19,7 +19,7 @@ Liike käyttää pikseleitä sekunnissa ja pelilogiikka kiinteää 1/156 sekunni
 
 Alusten koko on 36 × 48 pikseliä eli neljäsosa aiemmasta leveydestä ja korkeudesta. Horde sisältää oletuksena 40 vihollista. Vihollisten hyppy kestää 0,4 sekuntia, ja laskeutumista seuraa joka kerta satunnainen 0,35–1,3 sekunnin tauko. Myös ensimmäisen hypyn aloitusaika arvotaan erikseen jokaiselle viholliselle. Vihollisten välissä on 48 pikseliä. Nopeuksia, välejä ja rainbow-asetta voi säätää `round43.py`:n alun vakioista; hyppyjen ajoitus on `Enemy`-luokassa.
 
-Rivinvaihto ohittaa rivit, joilla viholliset kulkevat vastaan. Myös muiden vihollisten meneillään olevien rivinvaihtojen laskeutumisrivit huomioidaan. Samansuuntaisesti liikkuvalle riville voi liittyä. Koko pudotusreitti varataan rivinvaihdon ajaksi: varatulla reitillä olevat tai sille siirtyvät viholliset odottavat, kunnes reitti vapautuu.
+Viholliset liikkuvat oikealle. Kun alus on poistunut kokonaan oikeasta reunasta, se ilmestyy vasemmalta yhden rivin alempana ja jatkaa oikealle. Riviväli on aluksen korkeus + ENEMY_GAP (96 px). Sisääntulokohdan ollessa varattu alus odottaa tilan vapautumista; rivejä ei ohiteta. Reunanylityksen törmäystarkistus käsittelee poistumis- ja sisääntulokohdan erikseen.
 
 ## Testit
 
@@ -31,7 +31,7 @@ Testit käyttävät SDL:n dummy-ajuria eivätkä avaa fullscreen-ikkunaa.
 
 Jokainen tuhottu vihollinen antaa 100 pistettä. Pisteet, taso ja elämät näkyvät ruudun alareunassa. Pelkkä osuma ei anna pisteitä eikä pudota powerupia.
 
-Kun kaikki 40 vihollista on tuhottu, seuraavan tason `LEVEL 2`, `LEVEL 3` jne. teksti feidautuu keskelle ruutua. Siirtymä kestää 2,4 sekuntia; vanhat ammukset poistuvat, ja uusi horde syntyy tekstin hävittyä. Pelaajan elämät, pisteet, rainbow-lataukset ja salamalataukset säilyvät.
+Kun kaikki 40 vihollista on tuhottu, seuraavan tason `LEVEL 2`, `LEVEL 3` jne. teksti feidautuu keskelle ruutua. Siirtymä kestää 2,4 sekuntia; vanhat ammukset poistuvat, ja seuraava taistelu- tai tunnelikenttä alkaa tekstin hävittyä. Pelaajan elämät, pisteet, rainbow-lataukset ja salamalataukset säilyvät.
 
 Tason numero määrää vihollisten hitpointsit: tasolla 1 yksi, tasolla 2 kaksi, tasolla 3 kolme jne. Selvinnyt vihollinen välähtää valkoisena 0,12 sekuntia osumasta. Liike ja hyppyjen rytmi nopeutuvat 10 % edellisestä tasosta (1×, 1,1×, 1,21× jne.). Ammusten nopeus ja ampumisvälit säilyvät ennallaan.
 
@@ -53,10 +53,26 @@ Powerupit sijoitetaan vapaisiin paikkoihin vähintään 8 pikselin välein, myö
 
 ## Vihollistyypit
 
-Vihollistyypit toistuvat kuuden tason kierrossa: `vihu1.png`, `vihu2.png`, `vihu3.png`, `vihu4.png`, pikselilinnut ja valkoinen rect-hahmo. Taso 7 käyttää taas vihu1-kuvaa, taso 11 lintuja ja taso 12 rect-hahmoa. Hitpointsit ja 10 % nopeutus jatkavat kasvua todellisen tason mukaan.
+Vihollistyypit toistuvat seitsemän taistelukentän kierrossa: `vihu1.png`, `vihu2.png`, `vihu3.png`, `vihu4.png`, pikselilinnut, rect-hahmo ja sateenkaariväreissä hehkuva `|`-merkki. Tunnelit eivät kuluta kiertoa: tasot 1, 2, 4 ja 5 käyttävät vihu1–4-kuvia, taso 7 lintuja ja taso 8 rect-hahmoa. Tasolla 10 tulevat sateenkaariviivat, jotka pyörivät myötäpäivään yhden kierroksen kahdessa sekunnissa. Taso 11 aloittaa kuvakierron uudelleen. Hitpointsit ja 10 % nopeutus jatkavat kasvua todellisen tason mukaan.
 
-Linnut muistuttavat annettua Round42-kuvaa: pienet punaiset, syaanit, magentat tai keltaiset pikselisiivet ja lyhyt keskivartalo. Siivet vaihtavat karkean animaation kuvia kuusi kertaa sekunnissa. Linnut liikkuvat tasaisesti sivusuunnassa ilman hyppyjä, vaihtavat reunassa riviä alaspäin ja jatkavat vastakkaiseen suuntaan. Perusnopeus on 20 pikseliä sekunnissa ennen tasokohtaista nopeutusta.
+Linnut muistuttavat annettua Round42-kuvaa: pienet punaiset, syaanit, magentat tai keltaiset pikselisiivet ja lyhyt keskivartalo. Siivet vaihtavat karkean animaation kuvia kuusi kertaa sekunnissa. Linnut liikkuvat tasaisesti sivusuunnassa ilman hyppyjä, poistuvat oikeasta reunasta ja ilmestyvät vasemmalta yhden rivin alempana, edelleen oikealle lentäen. Perusnopeus on 20 pikseliä sekunnissa ennen tasokohtaista nopeutusta.
 
 Lintutason jälkeen tuleva rect-hahmo hyppii kuten aiemmat alukset. Kuusi alkuperäistä `pg.draw.rect`-komentoa löytyivät commitista `3e8021c` (Base game working); silmien ja alareunan aukot ovat läpinäkyviä.
 
 Debug: F5 siirtyy heti seuraavalle tasolle, myös tasonvaihtoanimaation aikana. Elämät, pisteet ja asetehostukset säilyvät. Edellisen tason viholliset, ammukset ja powerupit poistetaan ilman pistehyvitystä.
+
+## Tunnelikentät
+
+Joka kolmas kenttä (3, 6, 9, 12, ...) on satunnainen Round42-henkinen tunneli: psykedeelisellä sateenkaariplasmalla kuvioidut seinät, musta käytävä ja vapaa lähtöalue. Alus nousee automaattisesti vasta LEVEL-tekstin hävittyä. Ohjaa nuolinäppäimillä tai WASD:llä ja lennä koko alus ulos tunnelin yläpäästä. Ylös nopeuttaa nousua ja alas liikuttaa alusta alaspäin; ilman pystysuuntaista ohjausta automaattinen nousu jatkuu. Alareunan yli ei voi lentää. Tunnelissa ei ole vihollisia eikä aseita käytetä; aselataukset säilyvät seuraavaan taisteluun.
+
+Ensimmäinen tunneli on leveä ja loiva. Myöhemmissä tunneleissa on enemmän mutkia, kapeampi käytävä ja hieman nopeampi nousu. Vaikeudella on ylärajat, ja mutkien kaltevuus sovitetaan aluksen sivuttaisnopeuteen. Tunneli arvotaan kentän alkaessa. Seinäosuma vie elämän ja palauttaa räjähdysanimaation jälkeen saman tunnelin alkuun normaalin respawn-suojan kanssa. Läpäisy käynnistää seuraavan kentän LEVEL-siirtymän.
+
+F5:llä voi kokeilla tunnelia: uuden pelin alusta kaksi painallusta vie tasolle 3. Tunnelin aloitusteksti näytetään myös F5:llä siirryttäessä.
+
+Viimeisen rivin jälkeen vihollinen palaa yläreunaan ja jatkaa kiertoa. Varattu paluukohta odottaa vapautumista. Rect-hahmojen lähtöriveillä on eri värit, jotka säilyvät liikkeessä ja osumavälähdyksen jälkeen. Tunnelin vuorottelevat mutkat estävät suoran läpilennon; tasot 6, 9 ja 12 vaativat asteittain enemmän sivuttaisväistöjä.
+
+Parven harvetessa vihollisten liike nopeutuu tasaisesti: täysi parvi 1×, noin puolet jäljellä 1,5× ja viimeinen vihollinen 2×. Kerroin lisätään tasokohtaiseen nopeuteen ja nollautuu uuden parven alussa. Ampumisrytmi ja ammusten nopeus säilyvät ennallaan.
+
+## Äänet
+
+pygame.mixer lataa käynnistyksessä assets-kansiosta: laser2.ogg pääkanuunalle, laser3.ogg sateenkaaripurskeen aloitukseen, lightning1.ogg salamalle ja explosion1.ogg vihollisen tai pelaajan räjähdykseen. Ääniä voi soida päällekkäin. Puuttuva äänitiedosto tai äänilaite ei estä pelaamista.

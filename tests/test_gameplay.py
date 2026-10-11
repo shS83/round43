@@ -41,7 +41,25 @@ class GameplayTests(unittest.TestCase):
             self.assertEqual(x, 800)
             self.assertAlmostEqual(y, 1000 - game.BULLET_SPEED)
 
-    def test_enemy_waits_after_landing_and_stays_inside_edges(self):
+    def test_player_vertical_movement_and_screen_bounds(self):
+        for fps in (30, 60, 156):
+            player = game.Player()
+            start = player.pos_y
+            for _ in range(fps):
+                player.move(0, 1 / fps, vertical=-1)
+            self.assertAlmostEqual(start - player.pos_y, game.PLAYER_SPEED)
+            player.move(0, 10, vertical=-1)
+            self.assertEqual(player.rect.top, 0)
+            player.move(0, 10, vertical=1)
+            self.assertEqual(player.rect.bottom, game.HEIGHT)
+            player.move(1, 0.1, vertical=-1)
+            self.assertLess(player.rect.bottom, game.HEIGHT)
+            player.hit()
+            position = player.rect.copy()
+            player.move(1, 1, vertical=1)
+            self.assertEqual(player.rect, position)
+
+    def test_enemy_waits_after_landing_and_wraps_right_edge(self):
         enemy = game.Enemy(300, 64)
         enemy.update(enemy.jump_duration)
         landed = enemy.rect.copy()
@@ -53,10 +71,82 @@ class GameplayTests(unittest.TestCase):
         edge = game.Enemy(game.WIDTH - game.ENEMY_SIZE[0] - 5, 64)
         for _ in range(600):
             edge.update(game.STEP)
-            self.assertGreaterEqual(edge.rect.left, 0)
-            self.assertLessEqual(edge.rect.right, game.WIDTH)
+            self.assertGreaterEqual(edge.rect.left, -edge.width)
+            self.assertLessEqual(edge.rect.left, game.WIDTH)
         self.assertGreater(edge.rect.top, 64)
-        self.assertEqual(edge.direction, -1)
+        self.assertEqual(edge.direction, 1)
+
+    def test_wave_speeds_up_as_enemies_die_and_resets_for_next_wave(self):
+        sprites, enemies = pg.sprite.Group(), pg.sprite.Group()
+        game.spawn_enemies(sprites, enemies, horde=5, level=7)
+        survivor, *others = list(enemies)
+        for remaining in range(5, 0, -1):
+            factor = 1 + (5 - remaining) / 4
+            self.assertAlmostEqual(survivor.depletion_multiplier, factor)
+            before = survivor.base_x
+            survivor.update(0.01)
+            self.assertAlmostEqual(survivor.base_x - before,
+                                   game.BIRD_FLIGHT_SPEED * survivor.speed_multiplier * factor * 0.01)
+            if others:
+                others.pop().kill()
+        survivor.kill()
+        game.spawn_enemies(sprites, enemies, horde=5, level=8)
+        self.assertTrue(all(enemy.depletion_multiplier == 1 for enemy in enemies))
+
+    def test_last_jumping_enemy_uses_same_depletion_boost(self):
+        sprites, enemies = pg.sprite.Group(), pg.sprite.Group()
+        game.spawn_enemies(sprites, enemies, horde=2)
+        survivor, other = list(enemies)
+        other.kill()
+        survivor.phase = 0
+        start = survivor.base_x
+        survivor.update(survivor.jump_duration / 4)
+        self.assertEqual(survivor.rect.x, round(start + survivor.jump_distance / 2))
+
+    def test_weapon_and_explosion_sounds_only_play_on_successful_actions(self):
+        player = game.Player()
+        bullets = pg.sprite.Group()
+        with patch.object(game.sound_effects, 'play') as play:
+            self.assertFalse(player.start_rainbow())
+            play.assert_not_called()
+            player.shoot(bullets)
+            play.assert_called_once_with('cannon')
+            play.reset_mock()
+            player.rainbow_charges = 2
+            self.assertTrue(player.start_rainbow())
+            self.assertFalse(player.start_rainbow())
+            play.assert_called_once_with('rainbow')
+            play.reset_mock()
+            player.hit()
+            player.hit()
+            player.shoot(bullets)
+            play.assert_called_once_with('explosion')
+
+        player = game.Player()
+        player.lightning_charges = 1
+        enemies, sprites, powerups = (pg.sprite.Group() for _ in range(3))
+        enemy = game.Enemy(400, 100, enemies, level=2)
+        drops, progress = game.PowerUpDrops(), game.LevelProgress()
+        with patch.object(game.sound_effects, 'play') as play:
+            game.damage_enemy(enemy, sprites, powerups, drops, progress)
+            play.assert_not_called()
+            self.assertTrue(player.fire_lightning(enemies, sprites, powerups, drops, progress))
+            self.assertEqual([call.args[0] for call in play.call_args_list], ['lightning', 'explosion'])
+            play.reset_mock()
+            self.assertFalse(player.fire_lightning(enemies, sprites, powerups, drops, progress))
+            play.assert_not_called()
+
+    def test_sound_loader_tolerates_missing_files_and_unavailable_audio(self):
+        effects = game.SoundEffects()
+        with patch.object(pg.mixer, 'Sound', side_effect=FileNotFoundError):
+            effects.load()
+        self.assertFalse(effects.sounds)
+        effects.play('cannon')
+        with patch.object(pg.mixer, 'get_init', return_value=None), \
+                patch.object(pg.mixer, 'init', side_effect=pg.error('No audio device')):
+            effects.load()
+            effects.play('explosion')
+        self.assertFalse(effects.sounds)
 
     def test_enemy_formation_has_gaps(self):
         sprites, enemies = pg.sprite.Group(), pg.sprite.Group()
@@ -149,7 +239,7 @@ class GameplayTests(unittest.TestCase):
             player.update_rainbow(0.1, (100, 100), None, bullets)
             self.assertNotEqual(first_hue, fire.call_args.kwargs['hue'])
 
-    def test_enemy_shoots_slow_purple_fireballs_that_hit_player(self):
+    def test_enemy_shoots_slow_colored_fireballs_that_hit_player(self):
         player = game.Player()
         enemy = game.Enemy(player.rect.left, 64)
         bullets = pg.sprite.Group()
@@ -166,8 +256,8 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(bullet.image.get_size(), (21, 32))
         self.assertEqual(bullet.rect.size, (5, 7))
         core = bullet.image.get_at(game.ENEMY_BULLET_ANCHOR)
-        self.assertGreater(core.b, core.g)
-        self.assertGreater(core.r, core.g)
+        self.assertGreater(core.a, 0)
+        self.assertEqual(bullet.palette, game.ENEMY_PROJECTILE_PALETTES[enemy.enemy_type])
         enemy.update_weapon(0.02, bullets)
         self.assertEqual(len(bullets), 1)
         for _ in range(400):
@@ -184,54 +274,106 @@ class GameplayTests(unittest.TestCase):
         bullet.update(game.STEP)
         self.assertFalse(bullet.alive())
 
-    def test_enemy_skips_all_rows_with_oncoming_enemies(self):
-        enemies = pg.sprite.Group()
-        spacing = game.ENEMY_SIZE[1] + game.ENEMY_GAP
-        dropping = game.Enemy(game.WIDTH - game.ENEMY_SIZE[0] - 5, 64,
-                              enemies, enemy_group=enemies)
-        game.Enemy(400, 64 + spacing, enemies, enemy_group=enemies)
-        game.Enemy(600, 64 + 2 * spacing, enemies, enemy_group=enemies)
-        dropping.update(dropping.jump_duration + dropping.jump_cooldown)
-        self.assertTrue(dropping.is_dropping)
-        self.assertEqual(dropping.drop_y, 64 + 3 * spacing)
-        dropping.update(dropping.jump_duration)
-        self.assertEqual(dropping.rect.y, 64 + 3 * spacing)
-        dropping.update(dropping.jump_cooldown + 0.001)
-        self.assertFalse(dropping.is_dropping)
-        self.assertEqual(dropping.base_y, 64 + 3 * spacing)
-        self.assertEqual(dropping.direction, -1)
+    def test_selected_levels_fire_diagonally_at_unchanged_speed(self):
+        for level in (1, 2, 4, 5, 7, 8, 10):
+            for angle in (-30, 30):
+                enemy = game.Enemy(800, 100, level=level)
+                bullets = pg.sprite.Group()
+                enemy.shot_remaining = 0
+                with patch.object(game.random, 'choice', return_value=angle):
+                    enemy.update_weapon(game.STEP, bullets)
+                bullet = next(iter(bullets))
+                start = bullet.pos.copy()
+                bullet.update(0.2)
+                self.assertAlmostEqual(bullet.velocity.length(), game.ENEMY_BULLET_SPEED)
+                self.assertGreater(bullet.pos.y, start.y)
+                if level in (2, 5, 7):
+                    self.assertAlmostEqual(bullet.pos.x - start.x,
+                                           math.sin(math.radians(angle)) * game.ENEMY_BULLET_SPEED * 0.2)
+                else:
+                    self.assertEqual(bullet.pos.x, start.x)
 
-    def test_enemy_can_join_a_row_moving_in_same_direction(self):
-        enemies = pg.sprite.Group()
-        spacing = game.ENEMY_SIZE[1] + game.ENEMY_GAP
-        dropping = game.Enemy(game.WIDTH - game.ENEMY_SIZE[0] - 5, 64,
-                              enemies, enemy_group=enemies)
-        resident = game.Enemy(400, 64 + spacing, enemies, enemy_group=enemies)
-        resident.direction = -1
-        dropping.update(dropping.jump_duration + dropping.jump_cooldown)
-        self.assertEqual(dropping.drop_y, 64 + spacing)
+    def test_enemy_projectile_palette_persists_across_type_cycles(self):
+        for kind in range(1, game.ENEMY_CYCLE_LENGTH + 1):
+            for level in (kind, kind + game.ENEMY_CYCLE_LENGTH):
+                enemy = game.Enemy(800, 100, level=level)
+                for _ in range(2):
+                    bullets = pg.sprite.Group()
+                    enemy.shot_remaining = 0
+                    enemy.update_weapon(game.STEP, bullets)
+                    bullet = next(iter(bullets))
+                    self.assertEqual(bullet.palette, game.ENEMY_PROJECTILE_PALETTES[kind])
+                    self.assertIn(bullet.palette, game.ENEMY_PROJECTILE_COLORS)
+                    frames = bullet.frames
+                    bullet.update(0.1)
+                    self.assertIs(bullet.frames, frames)
 
-    def test_enemy_avoids_opposing_reserved_landing_row(self):
-        enemies = pg.sprite.Group()
-        spacing = game.ENEMY_SIZE[1] + game.ENEMY_GAP
-        reserving = game.Enemy(0, 64, enemies, enemy_group=enemies)
-        reserving.direction = -1
-        reserving.update(reserving.jump_duration + reserving.jump_cooldown)
-        self.assertEqual(reserving.drop_y, 64 + spacing)
-        dropping = game.Enemy(game.WIDTH - game.ENEMY_SIZE[0] - 5, 64,
-                              enemies, enemy_group=enemies)
-        dropping.update(dropping.jump_duration + dropping.jump_cooldown)
-        self.assertEqual(dropping.drop_y, 64 + 2 * spacing)
+    def test_enemy_projectile_palettes_have_distinct_colors_and_same_alpha(self):
+        frames = {name: game.enemy_fire_frames(name)[0] for name in game.ENEMY_PROJECTILE_COLORS}
+        colors = {name: image.get_at(game.ENEMY_BULLET_ANCHOR) for name, image in frames.items()}
+        self.assertGreater(colors['purple'].b, colors['purple'].g)
+        self.assertGreater(colors['green'].g, colors['green'].r)
+        self.assertEqual(colors['yellow'].r, colors['yellow'].g)
+        self.assertGreater(colors['yellow'].r, colors['yellow'].b)
+        self.assertEqual(colors['white'].r, colors['white'].g)
+        self.assertEqual(colors['white'].g, colors['white'].b)
+        alphas = [tuple(image.get_at((x, y)).a for x in range(image.get_width())
+                        for y in range(image.get_height())) for image in frames.values()]
+        self.assertTrue(all(alpha == alphas[0] for alpha in alphas))
 
-    def test_destroyed_enemy_no_longer_blocks_a_row(self):
-        enemies = pg.sprite.Group()
-        spacing = game.ENEMY_SIZE[1] + game.ENEMY_GAP
-        dropping = game.Enemy(game.WIDTH - game.ENEMY_SIZE[0] - 5, 64,
-                              enemies, enemy_group=enemies)
-        blocker = game.Enemy(400, 64 + spacing, enemies, enemy_group=enemies)
-        blocker.kill()
-        dropping.update(dropping.jump_duration + dropping.jump_cooldown)
-        self.assertEqual(dropping.drop_y, 64 + spacing)
+    def test_diagonal_enemy_bullets_leave_both_side_edges(self):
+        for x, angle in ((0, -30), (game.WIDTH, 30)):
+            bullets = pg.sprite.Group()
+            bullet = game.EnemyBullet(x, 100, bullets, angle=angle)
+            bullet.update(1)
+            self.assertFalse(bullet.alive())
+
+    def test_enemy_wraps_exactly_one_row_and_keeps_moving_right(self):
+        for level in (1, 5):
+            with self.subTest(level=level):
+                enemy = game.Enemy(game.WIDTH - 1, 64, level=level)
+                enemy.update(0.1)
+                self.assertEqual(enemy.base_y, 64 + enemy.height + game.ENEMY_GAP)
+                self.assertLess(enemy.rect.x, 0)
+                self.assertEqual(enemy.direction, 1)
+                for _ in range(game.FPS * 3):
+                    enemy.update(game.STEP)
+                self.assertGreater(enemy.rect.x, 0)
+                self.assertEqual(enemy.base_y, 64 + enemy.height + game.ENEMY_GAP)
+
+    def test_wrap_does_not_collide_with_middle_of_screen(self):
+        for level in (1, 5):
+            enemies = pg.sprite.Group()
+            enemy = game.Enemy(game.WIDTH - 1, 64, enemies, enemy_group=enemies, level=level)
+            game.Enemy(game.WIDTH // 2, 64, enemies, enemy_group=enemies)
+            game.Enemy(game.WIDTH // 2, 64 + enemy.height + game.ENEMY_GAP,
+                       enemies, enemy_group=enemies)
+            enemy.update(0.1)
+            self.assertLess(enemy.rect.x, 0)
+            self.assertEqual(enemy.base_y, 64 + enemy.height + game.ENEMY_GAP)
+
+    def test_occupied_wrap_entry_waits_then_resumes_without_skipping_row(self):
+        for level in (1, 5):
+            enemies = pg.sprite.Group()
+            enemy = game.Enemy(game.WIDTH - 1, 64, enemies, enemy_group=enemies, level=level)
+            blocker = game.Enemy(0, 64 + enemy.height + game.ENEMY_GAP,
+                                 enemies, enemy_group=enemies)
+            original = enemy.rect.copy()
+            enemy.update(0.1)
+            self.assertEqual(enemy.rect, original)
+            self.assertEqual(enemy.base_y, 64)
+            blocker.kill()
+            enemy.update(0.1)
+            self.assertLess(enemy.rect.x, 0)
+            self.assertEqual(enemy.base_y, 64 + enemy.height + game.ENEMY_GAP)
+
+    def test_enemy_exits_fully_before_wrapping(self):
+        for level in (1, 5):
+            enemy = game.Enemy(game.WIDTH - 20, 64, level=level)
+            enemy.update(0.05)
+            self.assertGreater(enemy.rect.right, game.WIDTH)
+            self.assertGreater(enemy.rect.left, 0)
+            self.assertEqual(enemy.base_y, 64)
 
     def test_powerup_drops_are_rare_and_have_a_cooldown(self):
         drops = game.PowerUpDrops()
@@ -247,33 +389,17 @@ class GameplayTests(unittest.TestCase):
             self.assertTrue(drops.try_drop((900, 400), sprites, powerups))
         self.assertEqual(len(powerups), 2)
 
-    def test_drop_waits_for_occupied_path_then_resumes(self):
-        enemies = pg.sprite.Group()
-        spacing = game.ENEMY_SIZE[1] + game.ENEMY_GAP
-        x = game.WIDTH - game.ENEMY_SIZE[0] - 5
-        dropping = game.Enemy(x, 64, enemies, enemy_group=enemies)
-        blocker = game.Enemy(x, 64 + spacing, enemies, enemy_group=enemies)
-        blocker.direction = -1
-        dropping.update(dropping.jump_duration + dropping.jump_cooldown)
-        self.assertFalse(dropping.is_dropping)
-        self.assertEqual(dropping.rect.topleft, (x, 64))
-        for _ in range(game.FPS * 12):
-            enemies.update(game.STEP)
-            self.assertFalse(dropping.rect.colliderect(blocker.rect))
-        self.assertEqual(dropping.base_y, 64 + spacing)
-        self.assertEqual(dropping.direction, -1)
-
     def test_multiple_rows_never_overlap_during_movement(self):
         sprites, enemies = pg.sprite.Group(), pg.sprite.Group()
         game.spawn_enemies(sprites, enemies, horde=32)
         items = list(enemies)
+        initial_rows = {enemy: enemy.base_y for enemy in items}
         for _ in range(game.FPS * 45):
             enemies.update(game.STEP)
             for index, enemy in enumerate(items):
                 self.assertFalse(any(enemy.rect.colliderect(other.rect)
                                      for other in items[index + 1:]))
-        self.assertTrue(any(enemy.base_y > 64 + (game.ENEMY_SIZE[1] + game.ENEMY_GAP)
-                            for enemy in enemies))
+        self.assertTrue(any(enemy.base_y > initial_rows[enemy] for enemy in enemies))
 
     def test_ship_pixels_return_to_original_ship_and_protect_respawn(self):
         player = game.Player()
@@ -830,10 +956,10 @@ class GameplayTests(unittest.TestCase):
             self.assertTrue(bird.is_bird)
             self.assertIs(bird.frames, game.bird_frames(bird.bird_color))
             self.assertEqual(bird.hitpoints, level)
-        for level in (game.RECT_ENEMY_FIRST_LEVEL, 12):
+        for level in (game.RECT_ENEMY_FIRST_LEVEL, game.RECT_ENEMY_FIRST_LEVEL + game.ENEMY_CYCLE_LENGTH):
             enemy = game.Enemy(300, 100, level=level)
             self.assertFalse(enemy.is_bird)
-            self.assertIs(enemy.normal_image, game.rect_enemy_image())
+            self.assertIs(enemy.normal_image, game.rect_enemy_image(enemy.row_color))
             enemy.update(enemy.jump_duration / 2 / enemy.speed_multiplier)
             self.assertLess(enemy.rect.y, 100)
 
@@ -866,16 +992,59 @@ class GameplayTests(unittest.TestCase):
             for index, bird in enumerate(items):
                 self.assertFalse(any(bird.rect.colliderect(other.rect) for other in items[index + 1:]))
         self.assertEqual(len(enemies), game.DEFAULT_HORDE_SIZE)
-        self.assertTrue(all(0 <= bird.rect.left and bird.rect.right <= game.WIDTH for bird in enemies))
+        self.assertTrue(all(-bird.width <= bird.rect.left <= game.WIDTH for bird in enemies))
         self.assertTrue(any(bird.base_y > 64 + game.ENEMY_SIZE[1] + game.ENEMY_GAP for bird in enemies))
 
     def test_recovered_rect_enemy_retains_original_eyes_and_bottom_cutouts(self):
         image = game.rect_enemy_image()
         self.assertEqual(image.get_size(), game.ENEMY_SIZE)
         original = pg.transform.scale(image, (24, 32))
-        self.assertEqual(original.get_at((1, 1)), pg.Color(255, 255, 255))
-        for position in ((6, 6), (15, 6), (1, 23), (19, 23), (9, 29)):
+        self.assertEqual(original.get_at((12, 16)), pg.Color(*game.RECT_ROW_COLORS[0]))
+        for position in ((1, 1), (22, 1), (6, 6), (15, 6), (1, 23), (19, 23), (9, 29)):
             self.assertEqual(original.get_at(position).a, 0)
+
+    def test_rect_formation_uses_a_different_color_for_each_row(self):
+        sprites, enemies = pg.sprite.Group(), pg.sprite.Group()
+        game.spawn_enemies(sprites, enemies, horde=60, level=8)
+        rows = {}
+        for enemy in enemies:
+            rows.setdefault(enemy.base_y, set()).add(enemy.row_color)
+        self.assertGreaterEqual(len(rows), 3)
+        self.assertTrue(all(len(colors) == 1 for colors in rows.values()))
+        self.assertEqual(len({next(iter(colors)) for colors in rows.values()}), len(rows))
+        for enemy in enemies:
+            color = enemy.row_color
+            enemy.take_hit()
+            enemy.update(game.ENEMY_HIT_FLASH)
+            self.assertIs(enemy.normal_image, game.rect_enemy_image(color))
+
+    def test_last_row_returns_to_top_including_level_28(self):
+        for kind in (1, 5, 6, 7):
+            enemies = pg.sprite.Group()
+            enemy = game.Enemy(game.WIDTH - 1, game.HEIGHT - 20, enemies,
+                               enemy_group=enemies, level=28, enemy_type=kind)
+            enemy.update(0.02)
+            self.assertEqual(enemy.base_y, 64)
+            self.assertLess(enemy.rect.x, 0)
+            for _ in range(game.FPS):
+                enemy.update(game.STEP)
+            self.assertGreater(enemy.rect.right, 0)
+            self.assertLess(enemy.rect.bottom, game.HEIGHT)
+            self.assertTrue(enemy.alive())
+
+    def test_return_to_top_waits_for_entry_and_keeps_enemy_alive(self):
+        for kind in (1, 5):
+            enemies = pg.sprite.Group()
+            enemy = game.Enemy(game.WIDTH - 1, game.HEIGHT - 20, enemies,
+                               enemy_group=enemies, level=28, enemy_type=kind)
+            blocker = game.Enemy(0, 64, enemies, enemy_group=enemies)
+            before = enemy.rect.copy()
+            enemy.update(0.02)
+            self.assertEqual(enemy.rect, before)
+            blocker.kill()
+            enemy.update(0.02)
+            self.assertEqual(enemy.base_y, 64)
+            self.assertTrue(enemy.alive())
 
     def test_f5_skip_preserves_player_and_builds_next_wave_immediately(self):
         session = game.GameSession()
@@ -901,7 +1070,7 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(session.player.lightning_charges, 1)
         self.assertEqual(session.player.rainbow_remaining, 0)
         self.assertEqual(len(session.enemy_group), game.DEFAULT_HORDE_SIZE)
-        self.assertTrue(all(enemy.is_bird and enemy.hitpoints == 5 for enemy in session.enemy_group))
+        self.assertTrue(all(enemy.enemy_type == 4 and enemy.hitpoints == 5 for enemy in session.enemy_group))
         self.assertFalse(any(enemy.alive() for enemy in old_enemies))
         self.assertFalse(bullet.alive())
         self.assertFalse(enemy_bullet.alive())
@@ -926,17 +1095,38 @@ class GameplayTests(unittest.TestCase):
             pg.init()
             pg.display.set_mode(previous_size)
 
-    def test_enemy_types_repeat_every_six_levels_without_resetting_difficulty(self):
+    def test_enemy_types_repeat_every_seven_levels_without_resetting_difficulty(self):
         for level in range(1, 19):
             enemy = game.Enemy(300, 100, level=level)
-            kind = (level - 1) % 6 + 1
+            kind = (level - 1) % 7 + 1
             self.assertEqual(enemy.hitpoints, level)
             self.assertAlmostEqual(enemy.speed_multiplier, 1.1 ** (level - 1))
             self.assertEqual(enemy.is_bird, kind == 5)
             if kind <= 4:
                 self.assertIs(enemy.normal_image, game.ship_image(f'vihu{kind}.png', game.ENEMY_SIZE))
             elif kind == 6:
-                self.assertIs(enemy.normal_image, game.rect_enemy_image())
+                self.assertIs(enemy.normal_image, game.rect_enemy_image(enemy.row_color))
+
+    def test_rainbow_bar_rotates_clockwise_and_preserves_hitbox(self):
+        enemy = game.Enemy(300, 100, level=10, enemy_type=game.RAINBOW_BAR_ENEMY_TYPE)
+        initial_size = enemy.rect.size
+        initial = enemy.image
+        enemy.update(7 / game.RAINBOW_BAR_FPS)
+        self.assertIsNot(enemy.image, initial)
+        self.assertEqual(enemy.rect.size, initial_size)
+        frame = game.rainbow_bar_frames()[7]
+        core = [(x - frame.get_width() / 2, y - frame.get_height() / 2)
+                for x in range(frame.get_width()) for y in range(frame.get_height())
+                if frame.get_at((x, y)).a > 180]
+        # Pystyviivan yläpää kallistuu oikealle: negatiivinen xy-korrelaatio.
+        self.assertLess(sum(x * y for x, y in core), 0)
+        colors = {frame.get_at((x, y))[:3] for x in range(frame.get_width())
+                  for y in range(frame.get_height()) if frame.get_at((x, y)).a > 180}
+        self.assertGreater(len(colors), 6)
+        enemy.take_hit()
+        self.assertIs(enemy.image, enemy.flash_image)
+        enemy.update(game.ENEMY_HIT_FLASH)
+        self.assertIs(enemy.image, enemy.normal_image)
 
     def test_birds_match_small_colored_pixel_wings(self):
         for color in game.BIRD_COLORS:
